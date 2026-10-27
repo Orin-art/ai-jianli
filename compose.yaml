@@ -1,0 +1,73 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.18.0
+    volumes:
+      - qdrant_data:/qdrant/storage
+    mem_limit: 768m
+  retrieval:
+    build: ./retrieval
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    mem_limit: 1g
+    cpus: 2.0
+    depends_on:
+      qdrant:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=5)"]
+      interval: 10s
+      timeout: 8s
+      retries: 12
+      start_period: 30s
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: career
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请先复制 .env.example 为 .env 并设置数据库密码}
+      POSTGRES_DB: career
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U career -d career"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://career:${POSTGRES_PASSWORD}@db:5432/career
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      OCR_ENABLED: "true"
+      OCR_TIMEOUT_SECONDS: "90"
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-flash}
+      RETRIEVAL_URL: http://retrieval:8100
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    mem_limit: 3g
+    cpus: 2.0
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    depends_on:
+      retrieval:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips=*"]
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+volumes:
+  postgres_data:
+  qdrant_data:

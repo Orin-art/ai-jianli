@@ -1,0 +1,3 @@
+# Optional for native development; installed in the backend Docker image.
+paddlepaddle==3.2.2
+paddleocr==3.3.3

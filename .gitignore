@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+*.db
+node_modules/
+dist/
+test-results/
+playwright-report/
+backend/.coverage
+.local-access.md
+frontend/tests/fixtures/*.xlsx
+frontend/tests/fixtures/*.docx
+artifacts/
