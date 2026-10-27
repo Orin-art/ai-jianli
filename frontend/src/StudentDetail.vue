@@ -44,6 +44,15 @@ async function saveFollowup() {
   } catch (e: any) { ElMessage.error(e.message) } finally { busy.value = false }
 }
 async function getResume(r: any) { try { await download(`/resumes/${r.id}/download`, r.filename) } catch (e: any) { ElMessage.error(e.message) } }
+async function handleFollowup(f: any) {
+  if (busy.value || f.handled_at) return
+  busy.value = true
+  try {
+    const updated = await api(`/students/${props.studentId}/followups/${f.id}/handle`, { method: 'POST' })
+    Object.assign(f, updated)
+    ElMessage.success('已标记为已处理'); emit('changed')
+  } catch (e: any) { ElMessage.error(e.message) } finally { busy.value = false }
+}
 async function cancelRecommendation(r: any) {
   if (busy.value) return
   busy.value = true
@@ -109,9 +118,13 @@ async function profileApplied() { await load(); emit('changed') }
         <div class="split"><el-form-item label="下一次跟进日期"><el-date-picker v-model="form.next_date" type="date" value-format="YYYY-MM-DD" placeholder="不设置提醒" /></el-form-item><el-button type="primary" native-type="submit" :loading="busy">保存跟进</el-button></div>
       </el-form>
       <div class="section-head"><h3>跟进时间线</h3></div>
-      <el-timeline v-if="student.followups.length"><el-timeline-item v-for="f in student.followups" :key="f.id" :timestamp="time(f.created_at)" placement="top"><div class="timeline-card"><el-tag size="small" type="info">{{ f.stage }}</el-tag><p class="note-text">{{ f.content }}</p><small v-if="f.next_date">下一次跟进：{{ f.next_date }}</small></div></el-timeline-item></el-timeline>
+      <el-timeline v-if="student.followups.length"><el-timeline-item v-for="f in student.followups" :key="f.id" :timestamp="time(f.created_at)" placement="top"><div class="timeline-card"><div class="split"><el-tag size="small" type="info">{{ f.stage }}</el-tag><el-tag v-if="f.handled_at" size="small" type="success">已处理</el-tag><el-button v-else text type="primary" :disabled="busy" @click="handleFollowup(f)">已处理</el-button></div><p v-if="f.job_snapshot"><strong>推荐岗位：{{ f.job_snapshot.title }}</strong><span v-if="f.job_snapshot.company"> · {{ f.job_snapshot.company }}</span></p><p v-else class="hint">未关联岗位</p><p class="note-text">{{ f.content }}</p><small v-if="f.next_date">下一次跟进：{{ f.next_date }}</small><small v-if="f.handled_at">处理时间：{{ time(f.handled_at) }}</small></div></el-timeline-item></el-timeline>
       <div v-else class="empty-inline">暂无跟进记录</div>
     </template>
     <ResumeExtraction v-model="extractionOpen" :resume-id="extractionResume" :extraction="extraction" :student="student" @applied="profileApplied" />
   </div>
 </template>
+<style scoped>
+.timeline-card { overflow-wrap: anywhere; }
+.timeline-card small { display: block; line-height: 1.8; }
+</style>

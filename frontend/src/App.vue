@@ -17,6 +17,7 @@ const students = ref<any[]>([]), studentTotal = ref(0), studentPage = ref(1), st
 const batches = ref<any[]>([]), batchTotal = ref(0), batchPage = ref(1), batch = ref<any>(null), batchFilter = ref('全部')
 const accounts = ref<any[]>([]), logs = ref<any[]>([]), logTotal = ref(0), logPage = ref(1)
 const studentId = ref<number | null>(null), studentDrawer = ref(false), detailKey = ref(0)
+const handlingFollowup = ref<number | null>(null)
 const jobDrawer = ref(false), selectedJob = ref<any>(null), jobEditing = ref(false), jobForm = ref<any>({})
 const recommendDialog = ref(false), recommendationTarget = ref<any>(null)
 const studentDialog = ref(false), editingStudent = ref<number | null>(null), studentForm = ref<any>({})
@@ -57,6 +58,18 @@ async function reload() {
     if (view.value === 'users') accounts.value = await api('/users')
     if (view.value === 'audit') await loadLogs()
   }); loading.value = false
+}
+async function handleReminder(row: any) {
+  if (handlingFollowup.value !== null) return
+  handlingFollowup.value = row.id
+  await run(async () => {
+    await api(`/students/${row.student_id}/followups/${row.id}/handle`, { method: 'POST' })
+    dashboard.value.reminders = dashboard.value.reminders.filter((f: any) => f.id !== row.id)
+    if (studentDrawer.value && studentId.value === row.student_id) detailKey.value++
+    ElMessage.success('已标记为已处理')
+    dashboard.value = await api('/dashboard')
+  })
+  handlingFollowup.value = null
 }
 async function navigate(key: string) { if (key !== 'jobs') recommendationTarget.value = null; view.value = key as View; await reload() }
 async function browseJobsForStudent(student: any) {
@@ -132,7 +145,7 @@ async function resetPassword() { busy.value = true; await run(async () => { awai
       <div v-loading="loading" class="view-content">
       <template v-if="view === 'dashboard'">
         <div class="metrics"><div v-for="m in [{ label: '共享岗位总数', value: dashboard.jobs, sub: '团队共享资源', icon: Briefcase }, { label: '当前有效岗位', value: dashboard.active_jobs, sub: '可用于学员推荐', icon: CircleCheck }, { label: me.role === 'admin' ? '团队学员' : '我的学员', value: dashboard.students, sub: '持续陪伴每一次求职', icon: User }, { label: '累计岗位推荐', value: dashboard.recommendations, sub: '已保存推荐记录', icon: ArrowRight }]" :key="m.label" class="metric-card"><div class="split"><span>{{ m.label }}</span><el-icon><component :is="m.icon" /></el-icon></div><strong>{{ m.value }}<small>{{ m.label.includes("学员") ? "位" : "条" }}</small></strong><p>{{ m.sub }}</p></div></div>
-        <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><h2>待跟进学员 <small>{{ dashboard.reminders.length ? `当前展示 ${dashboard.reminders.length} 条` : '' }}</small></h2><el-tag type="warning" effect="plain">今天及已逾期</el-tag></div><el-table v-if="dashboard.reminders.length" :data="dashboard.reminders"><el-table-column label="学员" prop="student_name" /><el-table-column label="跟进日期" prop="next_date" /><el-table-column label="最近记录" prop="content" show-overflow-tooltip /><el-table-column width="100"><template #default="{ row }"><el-button text type="primary" @click="showStudent(row.student_id)">去跟进</el-button></template></el-table-column></el-table><el-empty v-else description="暂无到期跟进，服务节奏尽在掌握" :image-size="105" /><p class="panel-foot">以每位学员最新跟进记录中的日期为准，最多展示 20 条。</p></section><section class="quick-panel"><span class="eyebrow">START HERE</span><h2>把今天的机会<br>带给合适的学员。</h2><p>从整理岗位开始，<br>到推荐与跟进，形成完整服务记录。</p><button @click="navigate('imports')"><span>01</span>导入一批新岗位<el-icon><ArrowRight /></el-icon></button><button @click="navigate('jobs')"><span>02</span>搜索合适的岗位<el-icon><ArrowRight /></el-icon></button><button @click="navigate('students')"><span>03</span>查看学员与进展<el-icon><ArrowRight /></el-icon></button></section></div>
+        <div class="dashboard-grid"><section class="panel"><div class="panel-heading"><h2>待跟进学员 <small>{{ dashboard.reminders.length ? `当前展示 ${dashboard.reminders.length} 条` : '' }}</small></h2><el-tag type="warning" effect="plain">今天及已逾期</el-tag></div><el-table v-if="dashboard.reminders.length" :data="dashboard.reminders"><el-table-column label="学员" prop="student_name" /><el-table-column label="跟进日期" prop="next_date" /><el-table-column label="推荐岗位" min-width="150" show-overflow-tooltip><template #default="{ row }">{{ row.job_snapshot?.title || '普通沟通' }}</template></el-table-column><el-table-column label="最近记录" prop="content" show-overflow-tooltip /><el-table-column width="170"><template #default="{ row }"><el-button text type="primary" @click="showStudent(row.student_id)">去跟进</el-button><el-button text type="success" :loading="handlingFollowup === row.id" :disabled="handlingFollowup !== null" @click="handleReminder(row)">已处理</el-button></template></el-table-column></el-table><el-empty v-else description="暂无到期跟进，服务节奏尽在掌握" :image-size="105" /><p class="panel-foot">以每位学员最新跟进记录中的日期为准，仅展示未处理的到期事件，最多 20 条。</p></section><section class="quick-panel"><span class="eyebrow">START HERE</span><h2>把今天的机会<br>带给合适的学员。</h2><p>从整理岗位开始，<br>到推荐与跟进，形成完整服务记录。</p><button @click="navigate('imports')"><span>01</span>导入一批新岗位<el-icon><ArrowRight /></el-icon></button><button @click="navigate('jobs')"><span>02</span>搜索合适的岗位<el-icon><ArrowRight /></el-icon></button><button @click="navigate('students')"><span>03</span>查看学员与进展<el-icon><ArrowRight /></el-icon></button></section></div>
         <div class="privacy-banner"><el-icon><Lock /></el-icon><div><strong>岗位共享，学员资料独立管理</strong><p>顾问只能访问自己负责的学员；管理员可分配学员并查看团队记录。</p></div><span>访问权限已启用</span></div>
       </template>
       <template v-if="view === 'jobs'">

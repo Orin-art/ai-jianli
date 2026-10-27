@@ -182,7 +182,7 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
     ids = visible_students(user).with_only_columns(Student.id)
     # Only the newest follow-up on each student is an active reminder.
     latest = select(func.max(Followup.id)).where(Followup.student_id.in_(ids)).group_by(Followup.student_id)
-    reminders = db.execute(select(Followup, Student.name).join(Student, Followup.student_id == Student.id).where(Followup.id.in_(latest), Followup.next_date <= today(), Student.status == '服务中').order_by(Followup.next_date).limit(20)).all()
+    reminders = db.execute(select(Followup, Student.name).join(Student, Followup.student_id == Student.id).where(Followup.id.in_(latest), Followup.handled_at.is_(None), Followup.next_date <= today(), Student.status == '服务中').order_by(Followup.next_date, Followup.id).limit(20)).all()
     return {
         'jobs': db.scalar(select(func.count()).select_from(Job)),
         'active_jobs': db.scalar(select(func.count()).select_from(Job).where(valid_job())),
@@ -565,6 +565,7 @@ def cancel_recommendation(student_id: int, recommendation_id: int, user: User = 
 @app.post('/api/students/{student_id}/followups', status_code=201)
 def create_followup(student_id: int, data: FollowupInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
     student_access(db, user, student_id)
+    snapshot = None
     if data.recommendation_id:
         recommendation = db.scalar(select(Recommendation).where(Recommendation.id == data.recommendation_id, Recommendation.student_id == student_id).with_for_update())
         if not recommendation or recommendation.student_id != student_id:
@@ -572,13 +573,26 @@ def create_followup(student_id: int, data: FollowupInput, user: User = Depends(c
         if data.stage == '沟通':
             raise HTTPException(400, '关联岗位时请选择岗位进展状态')
         recommendation.stage = data.stage
+        snapshot = recommendation.snapshot
     elif data.stage != '沟通':
         raise HTTPException(400, '更新岗位进展需要关联推荐记录')
-    followup = Followup(student_id=student_id, created_by=user.id, **data.model_dump())
+    followup = Followup(student_id=student_id, created_by=user.id, job_snapshot=snapshot, **data.model_dump())
     db.add(followup)
     db.flush()
     audit(db, user, '新增跟进', 'followup', followup.id)
     db.commit()
+    return as_dict(followup)
+
+@app.post('/api/students/{student_id}/followups/{followup_id}/handle')
+def handle_followup(student_id: int, followup_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    student_access(db, user, student_id)
+    followup = db.scalar(select(Followup).where(Followup.id == followup_id, Followup.student_id == student_id).with_for_update())
+    if not followup:
+        raise HTTPException(404, '跟进记录不存在或不属于此学员')
+    if followup.handled_at is None:
+        followup.handled_at = now()
+        audit(db, user, '跟进已处理', 'followup', followup.id)
+        db.commit()
     return as_dict(followup)
 
 @app.get('/api/audit-logs')

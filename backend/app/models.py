@@ -100,6 +100,8 @@ class Followup(Base):
     stage: Mapped[str] = mapped_column(String(20), default='沟通')
     content: Mapped[str] = mapped_column(Text)
     next_date: Mapped[date | None]
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime)
+    job_snapshot: Mapped[dict | None] = mapped_column(JSON)
     created_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
     created_at: Mapped[datetime] = mapped_column(default=now)
 
