@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .db import get_db, now
 from .models import User, AuthSession, LoginAttempt, Job, ImportBatch, Student, Resume, Recommendation, Followup, AuditLog
-from .schemas import LoginInput, UserInput, UserPatch, JobInput, StudentInput, RecommendationInput, FollowupInput, ResumeApplyInput, AIRecommendationInput
+from .schemas import LoginInput, UserInput, UserPatch, JobInput, StudentInput, StudentOwnerInput, RecommendationInput, FollowupInput, ResumeApplyInput, AIRecommendationInput
 from .resume_cache import extract_resume
 from .ocr import status as ocr_status, client as ocr_client
 from .ocr_worker import MAX_PIXELS
@@ -146,7 +146,13 @@ def me(user: User = Depends(current_user)):
 
 @app.get('/api/users')
 def users(user: User = Depends(admin), db: Session = Depends(get_db)):
-    return [user_dict(u) for u in db.scalars(select(User).order_by(User.id))]
+    totals = dict(db.execute(select(Student.owner_id, func.count()).group_by(Student.owner_id)).all())
+    serving = dict(db.execute(select(Student.owner_id, func.count()).where(Student.status == '服务中').group_by(Student.owner_id)).all())
+    latest = select(func.max(Followup.id)).group_by(Followup.student_id)
+    due = dict(db.execute(select(Student.owner_id, func.count()).join(Followup, Followup.student_id == Student.id).where(
+        Followup.id.in_(latest), Followup.handled_at.is_(None), Followup.next_date <= today(), Student.status == '服务中'
+    ).group_by(Student.owner_id)).all())
+    return [{**user_dict(u), 'student_count': totals.get(u.id, 0), 'serving_count': serving.get(u.id, 0), 'due_count': due.get(u.id, 0)} for u in db.scalars(select(User).order_by(User.id))]
 
 @app.post('/api/users', status_code=201)
 def create_user(data: UserInput, user: User = Depends(admin), db: Session = Depends(get_db)):
@@ -167,7 +173,7 @@ def patch_user(user_id: int, data: UserPatch, user: User = Depends(admin), db: S
     if not account:
         raise HTTPException(404, '账号不存在')
     if account.role == 'admin':
-        raise HTTPException(400, '管理员账号请使用服务端管理命令维护')
+        raise HTTPException(400, '主账号不能停用或通过顾问管理修改，请使用服务端管理命令维护')
     if data.active is not None:
         account.active = data.active
     if data.password:
@@ -326,16 +332,21 @@ def cancel_import(batch_id: int, user: User = Depends(current_user), db: Session
     return batch_dict(batch)
 
 @app.get('/api/students')
-def students(q: str = Query('', max_length=200), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), user: User = Depends(current_user), db: Session = Depends(get_db)):
+def students(q: str = Query('', max_length=200), owner_id: int | None = Query(None, gt=0), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), user: User = Depends(current_user), db: Session = Depends(get_db)):
     query = visible_students(user)
+    if owner_id is not None:
+        if user.role != 'admin' and owner_id != user.id:
+            raise HTTPException(403, '仅主账号可查看其他顾问的学员')
+        query = query.where(Student.owner_id == owner_id)
     if q:
         query = query.where(or_(Student.name.contains(q, autoescape=True), Student.major.contains(q, autoescape=True), Student.school.contains(q, autoescape=True), Student.target_role.contains(q, autoescape=True)))
     total = db.scalar(select(func.count()).select_from(query.subquery()))
-    return {'items': [as_dict(s) for s in db.scalars(query.order_by(Student.id.desc()).offset((page - 1) * page_size).limit(page_size))], 'total': total}
+    rows = db.execute(query.add_columns(User.name.label('owner_name')).join(User, User.id == Student.owner_id).order_by(Student.id.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return {'items': [{**as_dict(s), 'owner_name': owner_name} for s, owner_name in rows], 'total': total}
 
 def check_owner(db, user, owner_id):
     if user.role != 'admin' and owner_id != user.id:
-        raise HTTPException(403, '只有管理员可以分配学员')
+        raise HTTPException(403, '只有主账号可以分配学员')
     owner = db.get(User, owner_id)
     if not owner or not owner.active:
         raise HTTPException(400, '负责顾问不存在或已停用')
@@ -350,6 +361,21 @@ def create_student(data: StudentInput, user: User = Depends(current_user), db: S
     db.flush()
     audit(db, user, '创建学员', 'student', student.id)
     db.commit()
+    return as_dict(student)
+
+@app.patch('/api/students/{student_id}/owner')
+def assign_student(student_id: int, data: StudentOwnerInput, user: User = Depends(admin), db: Session = Depends(get_db)):
+    student = db.scalar(select(Student).where(Student.id == student_id).with_for_update())
+    if not student:
+        raise HTTPException(404, '学员不存在')
+    if student.owner_id != data.expected_owner_id:
+        raise HTTPException(409, '学员负责人已变更，请刷新后重新分配')
+    check_owner(db, user, data.owner_id)
+    old_owner_id = student.owner_id
+    if old_owner_id != data.owner_id:
+        student.owner_id = data.owner_id
+        audit(db, user, f'转交学员 {old_owner_id} → {data.owner_id}', 'student', student.id)
+        db.commit()
     return as_dict(student)
 
 @app.get('/api/students/{student_id}')

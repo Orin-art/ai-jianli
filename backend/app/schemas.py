@@ -54,6 +54,10 @@ class StudentInput(Input):
     notes: str = Field(default='', max_length=10000)
     owner_id: int | None = None
 
+class StudentOwnerInput(Input):
+    owner_id: int = Field(gt=0)
+    expected_owner_id: int = Field(gt=0)
+
 class ProfileChange(Input):
     field: Literal['name', 'phone', 'school', 'major', 'education']
     value: str = Field(min_length=1, max_length=200)

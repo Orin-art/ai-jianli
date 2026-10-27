@@ -1,10 +1,11 @@
 from datetime import datetime, date
-from sqlalchemy import String, Text, ForeignKey, JSON, LargeBinary, DateTime, UniqueConstraint
+from sqlalchemy import String, Text, ForeignKey, JSON, LargeBinary, DateTime, UniqueConstraint, Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base, now
 
 class User(Base):
     __tablename__ = 'users'
+    __table_args__ = (Index('uq_users_primary_account', 'role', unique=True, postgresql_where=text("role = 'admin'"), sqlite_where=text("role = 'admin'")),)
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True)
     name: Mapped[str] = mapped_column(String(80))

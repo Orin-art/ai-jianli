@@ -29,7 +29,7 @@ def current_user(request: Request, db: Session = Depends(get_db)):
 
 def admin(user: User = Depends(current_user)):
     if user.role != 'admin':
-        raise HTTPException(403, '仅管理员可执行此操作')
+        raise HTTPException(403, '仅主账号可执行此操作')
     return user
 
 def new_session(db, user, response):
