@@ -1,6 +1,7 @@
 export async function api(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers)
   headers.set('X-Requested-With', 'career-web')
+  headers.set('ngrok-skip-browser-warning', '1')
   if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
   const response = await fetch(`/api${path}`, { ...options, headers, credentials: 'same-origin' })
   if (!response.ok) {
@@ -15,7 +16,7 @@ export async function api(path: string, options: RequestInit = {}) {
   return response.status === 204 ? null : response.json()
 }
 export async function download(path: string, name: string) {
-  const response = await fetch(`/api${path}`, { credentials: 'same-origin' })
+  const response = await fetch(`/api${path}`, { credentials: 'same-origin', headers: { 'ngrok-skip-browser-warning': '1' } })
   if (!response.ok) throw new Error('下载失败，请确认登录状态和访问权限')
   const url = URL.createObjectURL(await response.blob())
   const a = document.createElement('a')
