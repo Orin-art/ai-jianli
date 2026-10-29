@@ -2,6 +2,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, salary, time } from './api'
+import ExportJobs from './ExportJobs.vue'
 
 const props = defineProps<{ student: any }>()
 const emit = defineEmits(['recommended'])
@@ -85,6 +86,7 @@ async function recommend() {
       <el-alert v-if="error" :title="error" type="error" :closable="false" />
     </template>
     <div v-if="result" class="ai-result">
+      <ExportJobs v-if="result.items.length" :student="student" :jobs="result.items" label="导出 AI 候选岗位" />
       <p class="hint">{{ result.model }} · {{ time(result.generated_at) }} · 本次考察 {{ result.considered }} 个岗位 · 剩余 {{ result.items.length }} 个候选</p>
       <p v-if="result.retrieval" class="hint">{{ result.retrieval.engine }} 从 {{ result.retrieval.eligible_jobs }} 个符合基本条件的岗位中召回 {{ result.retrieval.retrieved_jobs }} 个；简历向量不保存。</p>
       <p class="note-text">{{ result.analysis.summary }}</p>

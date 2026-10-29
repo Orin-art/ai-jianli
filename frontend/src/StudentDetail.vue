@@ -5,6 +5,7 @@ import { api, download, salary, stages, time } from './api'
 import ResumeExtraction from './ResumeExtraction.vue'
 import MatchedJobs from './MatchedJobs.vue'
 import AiMatchedJobs from './AiMatchedJobs.vue'
+import ExportJobs from './ExportJobs.vue'
 const props = defineProps<{ studentId: number | null }>()
 const emit = defineEmits(['edit', 'changed', 'browse-jobs'])
 const student = ref<any>(null), loading = ref(false), busy = ref(false)
@@ -109,6 +110,7 @@ async function profileApplied() { await load(); emit('changed') }
       <div v-if="!student.resumes.length" class="empty-inline">尚未上传简历</div>
       <div class="section-head"><h3>岗位推荐 <small>{{ student.recommendations.length }} 条</small></h3><el-button type="primary" plain @click="emit('browse-jobs', student)">去共享岗位库推荐</el-button></div>
       <p class="hint">下列信息为推荐时的岗位快照。</p>
+      <ExportJobs :student="student" :jobs="student.recommendations.map((r: any) => ({ ...r.snapshot, id: r.job_id }))" label="导出已推荐岗位" />
       <div v-for="r in student.recommendations" :key="r.id" class="recommend-card"><div class="split"><strong>{{ r.snapshot.title }}</strong><el-tag :type="r.stage === '已录用' ? 'success' : 'info'">{{ r.stage }}</el-tag></div><p>{{ r.snapshot.company }} · {{ r.snapshot.city }}</p><span class="salary">{{ salary(r.snapshot) }}</span><small>{{ time(r.created_at) }}</small><div class="drawer-actions"><el-button text type="danger" :disabled="busy" @click="cancelRecommendation(r)">取消推荐</el-button></div></div>
       <div v-if="!student.recommendations.length" class="empty-inline">还没有岗位推荐，从共享岗位库选择一个合适的机会。</div>
       <div class="section-head"><h3>记录跟进</h3></div>

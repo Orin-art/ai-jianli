@@ -15,12 +15,21 @@ export async function api(path: string, options: RequestInit = {}) {
   }
   return response.status === 204 ? null : response.json()
 }
-export async function download(path: string, name: string) {
-  const response = await fetch(`/api${path}`, { credentials: 'same-origin', headers: { 'ngrok-skip-browser-warning': '1' } })
-  if (!response.ok) throw new Error('下载失败，请确认登录状态和访问权限')
+export async function download(path: string, name: string, options: RequestInit = {}) {
+  const headers = new Headers(options.headers)
+  headers.set('ngrok-skip-browser-warning', '1')
+  headers.set('X-Requested-With', 'career-web')
+  if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
+  const response = await fetch(`/api${path}`, { ...options, credentials: 'same-origin', headers })
+  if (!response.ok) {
+    let message = '下载失败，请稍后重试'
+    try { const data = await response.json(); if (typeof data.detail === 'string') message = data.detail } catch { /* Proxy error */ }
+    if (response.status === 401) window.dispatchEvent(new Event('session-expired'))
+    throw new Error(message)
+  }
   const url = URL.createObjectURL(await response.blob())
   const a = document.createElement('a')
-  a.href = url; a.download = name; a.click(); URL.revokeObjectURL(url)
+  a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 export const educations = ['不限', '高中及以下', '中专', '大专', '本科', '硕士', '博士']
 export const experiences = ['不限', '应届生', '1年以下', '1-3年', '3-5年', '5年以上']

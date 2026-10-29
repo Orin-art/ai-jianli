@@ -29,12 +29,15 @@ class LoginAttempt(Base):
 class Job(Base):
     __tablename__ = 'jobs'
     id: Mapped[int] = mapped_column(primary_key=True)
-    title: Mapped[str] = mapped_column(String(160), index=True)
+    title: Mapped[str] = mapped_column(String(2000))
     company: Mapped[str] = mapped_column(String(160), index=True)
-    city: Mapped[str] = mapped_column(String(80), index=True)
+    city: Mapped[str] = mapped_column(String(1000), index=True)
     education: Mapped[str] = mapped_column(String(20), default='不限')
     experience: Mapped[str] = mapped_column(String(20), default='不限')
-    major: Mapped[str] = mapped_column(String(200), default='')
+    major: Mapped[str] = mapped_column(String(1000), default='')
+    recruitment_details: Mapped[dict] = mapped_column(JSON, default=dict, server_default='{}')
+    source_batch_id: Mapped[int | None] = mapped_column(ForeignKey('import_batches.id'))
+    source_row_number: Mapped[int | None]
     salary_min: Mapped[int | None]
     salary_max: Mapped[int | None]
     description: Mapped[str] = mapped_column(Text, default='')
@@ -52,6 +55,8 @@ class ImportBatch(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     status: Mapped[str] = mapped_column(String(20), default='待确认')
     rows: Mapped[list] = mapped_column(JSON)
+    source_file: Mapped[bytes | None] = mapped_column(LargeBinary, deferred=True)
+    source_sheet: Mapped[str | None] = mapped_column(String(31))
     created_at: Mapped[datetime] = mapped_column(default=now)
     committed_at: Mapped[datetime | None]
 

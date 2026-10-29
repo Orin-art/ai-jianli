@@ -23,18 +23,19 @@ class UserPatch(Input):
     password: str | None = Field(default=None, min_length=10, max_length=128)
 
 class JobInput(Input):
-    title: str = Field(min_length=1, max_length=160)
+    title: str = Field(min_length=1, max_length=2000)
     company: str = Field(min_length=1, max_length=160)
-    city: str = Field(min_length=1, max_length=80)
+    city: str = Field(min_length=1, max_length=1000)
     education: Education = '不限'
     experience: Experience = '不限'
-    major: str = Field(default='', max_length=200)
+    major: str = Field(default='', max_length=1000)
     salary_min: int | None = Field(default=None, ge=0, le=1000000)
     salary_max: int | None = Field(default=None, ge=0, le=1000000)
     description: str = Field(default='', max_length=10000)
     source: str = Field(default='', max_length=300)
     expires_on: date | None = None
     status: Literal['有效', '失效'] = '有效'
+    recruitment_details: dict[str, str] = Field(default_factory=dict, max_length=20)
 
     @model_validator(mode='after')
     def salary_range(self):
@@ -68,6 +69,12 @@ class ResumeApplyInput(Input):
 
 class RecommendationInput(Input):
     job_id: int
+
+class JobExportInput(Input):
+    job_ids: list[int] = Field(min_length=1, max_length=2000)
+
+class JobDeleteInput(Input):
+    job_ids: list[int] = Field(min_length=1, max_length=2000)
 
 class AIRecommendationInput(Input):
     resume_id: int = Field(gt=0)

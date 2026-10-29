@@ -1,7 +1,9 @@
 import logging
+import hashlib
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import PurePath
+from urllib.parse import quote
 from zipfile import ZipFile, BadZipFile
 from fastapi import FastAPI, Depends, HTTPException, Request, Response, UploadFile, File, Query
 from fastapi.exceptions import RequestValidationError
@@ -11,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .db import get_db, now
 from .models import User, AuthSession, LoginAttempt, Job, ImportBatch, Student, Resume, Recommendation, Followup, AuditLog
-from .schemas import LoginInput, UserInput, UserPatch, JobInput, StudentInput, StudentOwnerInput, RecommendationInput, FollowupInput, ResumeApplyInput, AIRecommendationInput
+from .schemas import LoginInput, UserInput, UserPatch, JobInput, StudentInput, StudentOwnerInput, RecommendationInput, FollowupInput, ResumeApplyInput, AIRecommendationInput, JobExportInput, JobDeleteInput
 from .resume_cache import extract_resume
 from .ocr import status as ocr_status, client as ocr_client
 from .ocr_worker import MAX_PIXELS
@@ -19,11 +21,12 @@ from PIL import Image, UnidentifiedImageError
 from contextlib import asynccontextmanager
 from pydantic import ValidationError
 from .security import current_user, admin, passwords, DUMMY_HASH, COOKIE, token_hash, new_session, audit, user_dict
-from .imports import HEADERS, fingerprint, inspect_xlsx, workbook_bytes, template_bytes
+from .imports import HEADERS, fingerprint, inspect_xlsx, workbook_bytes, template_bytes, error_workbook_bytes
 from .body_limit import BodyLimitMiddleware
 from .matching import MATCH_LIMIT, match_job
 from . import ai_matching
 from . import vector_index
+from .job_export import student_jobs_workbook
 
 @asynccontextmanager
 async def lifespan(app):
@@ -57,8 +60,8 @@ def as_dict(obj, exclude=()):
     return {c.name: getattr(obj, c.name) for c in obj.__table__.columns if c.name not in exclude}
 
 def job_dict(job):
-    data = as_dict(job, ('fingerprint',))
-    data['effective_status'] = '失效' if job.status == '失效' or (job.expires_on and job.expires_on < today()) else '有效'
+    data = as_dict(job, ('fingerprint', 'source_batch_id', 'source_row_number'))
+    data['effective_status'] = '失效' if job.status != '有效' or (job.expires_on and job.expires_on < today()) else '有效'
     return data
 
 def visible_students(user):
@@ -78,7 +81,7 @@ def owned_batch(db, user, batch_id):
     return batch
 
 def batch_dict(batch, with_rows=True):
-    data = as_dict(batch, ('rows',))
+    data = as_dict(batch, ('rows', 'source_file', 'source_sheet'))
     data['counts'] = {state: sum(r['state'] == state for r in batch.rows) for state in ('可导入', '错误', '重复', '已导入')}
     data['total'] = len(batch.rows)
     if with_rows:
@@ -190,7 +193,7 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
     latest = select(func.max(Followup.id)).where(Followup.student_id.in_(ids)).group_by(Followup.student_id)
     reminders = db.execute(select(Followup, Student.name).join(Student, Followup.student_id == Student.id).where(Followup.id.in_(latest), Followup.handled_at.is_(None), Followup.next_date <= today(), Student.status == '服务中').order_by(Followup.next_date, Followup.id).limit(20)).all()
     return {
-        'jobs': db.scalar(select(func.count()).select_from(Job)),
+        'jobs': db.scalar(select(func.count()).select_from(Job).where(Job.status != '已删除')),
         'active_jobs': db.scalar(select(func.count()).select_from(Job).where(valid_job())),
         'students': db.scalar(select(func.count()).select_from(Student).where(Student.id.in_(ids))),
         'recommendations': db.scalar(select(func.count()).select_from(Recommendation).where(Recommendation.student_id.in_(ids))),
@@ -199,7 +202,7 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
 
 @app.get('/api/jobs')
 def jobs(q: str = Query('', max_length=200), city: str = '', education: str = '', experience: str = '', status: str = '', salary_min: int | None = Query(None, ge=0), page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), user: User = Depends(current_user), db: Session = Depends(get_db)):
-    query = select(Job)
+    query = select(Job).where(Job.status != '已删除')
     if q:
         query = query.where(or_(*[col.contains(q, autoescape=True) for col in (Job.title, Job.company, Job.major, Job.description)]))
     if city:
@@ -221,16 +224,16 @@ def jobs(q: str = Query('', max_length=200), city: str = '', education: str = ''
 @app.get('/api/jobs/{job_id}')
 def job_detail(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     job = db.get(Job, job_id)
-    if not job:
+    if not job or job.status == '已删除':
         raise HTTPException(404, '岗位不存在')
     return job_dict(job)
 
 @app.put('/api/jobs/{job_id}')
 def update_job(job_id: int, data: JobInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    job = db.get(Job, job_id)
-    if not job:
+    job = db.scalar(select(Job).where(Job.id == job_id).with_for_update())
+    if not job or job.status == '已删除':
         raise HTTPException(404, '岗位不存在')
-    for key, value in data.model_dump().items():
+    for key, value in data.model_dump(exclude={'recruitment_details'} if 'recruitment_details' not in data.model_fields_set else set()).items():
         setattr(job, key, value)
     job.fingerprint = fingerprint(data.model_dump())
     audit(db, user, '更新岗位', 'job', job_id)
@@ -241,6 +244,73 @@ def update_job(job_id: int, data: JobInput, user: User = Depends(current_user), 
         raise HTTPException(409, '已存在同岗位名称、公司和城市的岗位')
     vector_index.notify()
     return job_dict(job)
+
+def remove_jobs(db, user, ids):
+    ids = set(ids)
+    rows = list(db.scalars(select(Job).where(Job.id.in_(ids)).with_for_update()))
+    if len(rows) != len(ids):
+        raise HTTPException(404, '部分岗位不存在，请刷新后重试')
+    if user.role != 'admin' and any(job.created_by != user.id for job in rows):
+        raise HTTPException(403, '只能删除本人导入的岗位，管理员可删除全部岗位')
+    count = 0
+    for job in rows:
+        if job.status == '已删除':
+            continue
+        job.status = '已删除'
+        # Free the original duplicate key while keeping recommendation foreign keys.
+        job.fingerprint = hashlib.sha256(f'deleted-job:{job.id}'.encode()).hexdigest()
+        count += 1
+    return count
+
+
+@app.delete('/api/jobs/{job_id}')
+def delete_job(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    count = remove_jobs(db, user, [job_id])
+    audit(db, user, '删除岗位', 'job', job_id)
+    db.commit(); vector_index.notify()
+    return {'deleted': count}
+
+
+@app.post('/api/jobs/bulk-delete')
+def delete_jobs(data: JobDeleteInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    count = remove_jobs(db, user, data.job_ids)
+    audit(db, user, f'批量删除岗位 {count} 条', 'user', user.id)
+    db.commit(); vector_index.notify()
+    return {'deleted': count}
+
+
+def batch_jobs(db, batch):
+    imported = {fingerprint(row['data']): row['row_number'] for row in batch.rows if row['state'] == '已导入'}
+    query = select(Job).where(or_(Job.source_batch_id == batch.id,
+        (Job.source_batch_id.is_(None)) & (Job.created_by == batch.user_id) & (Job.fingerprint.in_(imported))))
+    return list(db.scalars(query)), imported
+
+
+@app.get('/api/imports/{batch_id}/jobs/summary')
+def batch_job_summary(batch_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    batch = owned_batch(db, user, batch_id)
+    rows, imported = batch_jobs(db, batch)
+    remaining = [job.id for job in rows if job.status != '已删除']
+    recommended = db.scalar(select(func.count()).select_from(Recommendation).where(Recommendation.job_id.in_(remaining)))
+    return {'remaining': len(remaining), 'deleted': len(rows) - len(remaining),
+            'untraceable': max(0, len(imported) - len(rows)), 'recommendations': recommended}
+
+
+@app.delete('/api/imports/{batch_id}/jobs')
+def delete_batch_jobs(batch_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    batch = owned_batch(db, user, batch_id)
+    if batch.status != '已完成':
+        raise HTTPException(409, '仅已完成的导入批次可以删除岗位')
+    rows, imported = batch_jobs(db, batch)
+    for job in rows:
+        if job.source_batch_id is None:
+            job.source_row_number = imported.get(job.fingerprint)
+            job.source_batch_id = batch.id
+    count = remove_jobs(db, user, [job.id for job in rows])
+    audit(db, user, f'删除导入批次岗位 {count} 条', 'import', batch.id)
+    db.commit(); vector_index.notify()
+    return {'deleted': count}
+
 
 @app.get('/api/imports/template')
 def import_template(user: User = Depends(current_user)):
@@ -263,22 +333,23 @@ def preview_import(file: UploadFile = File(...), user: User = Depends(current_us
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(400, '文件不能超过 10MB')
     try:
-        rows = inspect_xlsx(content)
+        rows, source_sheet = inspect_xlsx(content, with_source=True)
     except HTTPException:
         raise
     except Exception:
         logging.getLogger(__name__).warning('Rejected malformed workbook', exc_info=True)
         raise HTTPException(400, '工作簿内容无法解析，请使用模板重新保存为 .xlsx')
     seen = set()
+    existing = set(db.scalars(select(Job.fingerprint).where(Job.status != '已删除')))
     for row in rows:
         if row['errors']:
             continue
         fp = fingerprint(row['data'])
-        if fp in seen or db.scalar(select(Job.id).where(Job.fingerprint == fp)):
+        if fp in seen or fp in existing:
             row.update(state='重复', errors=['同岗位名称、公司和城市已存在，本行将跳过'])
         seen.add(fp)
     filename = file.filename.replace('\\', '/').rsplit('/', 1)[-1][:200]
-    batch = ImportBatch(filename=filename, user_id=user.id, rows=rows)
+    batch = ImportBatch(filename=filename, user_id=user.id, rows=rows, source_file=content, source_sheet=source_sheet)
     db.add(batch)
     db.flush()
     audit(db, user, '预览岗位导入', 'import', batch.id)
@@ -292,8 +363,7 @@ def import_detail(batch_id: int, user: User = Depends(current_user), db: Session
 @app.get('/api/imports/{batch_id}/errors')
 def import_errors(batch_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     batch = owned_batch(db, user, batch_id)
-    rows = [[r['row_number'], *[r['data'].get(k, '') for k in HEADERS.values()], '；'.join(r['errors'])] for r in batch.rows if r['errors']]
-    return Response(workbook_bytes(['原始行号', *HEADERS, '原因'], rows), media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': 'attachment; filename="import-errors.xlsx"'})
+    return Response(error_workbook_bytes(batch.rows), media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers={'Content-Disposition': 'attachment; filename="import-errors.xlsx"'})
 
 @app.post('/api/imports/{batch_id}/commit')
 def commit_import(batch_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
@@ -308,7 +378,9 @@ def commit_import(batch_id: int, user: User = Depends(current_user), db: Session
         job = JobInput.model_validate(row['data'])
         try:
             with db.begin_nested():
-                db.add(Job(**job.model_dump(), fingerprint=fingerprint(row['data']), created_by=user.id))
+                db.add(Job(**job.model_dump(), fingerprint=fingerprint(row['data']), created_by=user.id,
+                           source_batch_id=batch.id if batch.source_sheet else None,
+                           source_row_number=row['row_number'] if batch.source_sheet else None))
                 db.flush()
             row['state'] = '已导入'
         except IntegrityError:
@@ -399,6 +471,22 @@ def update_student(student_id: int, data: StudentInput, user: User = Depends(cur
     audit(db, user, f'转交学员 {old_owner_id} → {owner_id}' if transferred else '更新学员', 'student', student.id)
     db.commit()
     return as_dict(student)
+
+@app.post('/api/students/{student_id}/jobs/export')
+def export_student_jobs(student_id: int, data: JobExportInput, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    student = student_access(db, user, student_id)
+    ids = list(dict.fromkeys(data.job_ids))
+    recommended = select(Recommendation.job_id).where(Recommendation.student_id == student_id)
+    jobs = {job.id: job for job in db.scalars(select(Job).where(Job.id.in_(ids), or_(Job.status != '已删除', Job.id.in_(recommended))))}
+    if len(jobs) != len(ids):
+        raise HTTPException(404, '部分岗位已不存在，请刷新列表后重新选择')
+    content = student_jobs_workbook(db, [jobs[job_id] for job_id in ids])
+    filename = quote(f'{student.name}_筛选岗位_{today().isoformat()}.xlsx', safe='')
+    audit(db, user, '导出学员筛选岗位', 'student', student.id)
+    db.commit()
+    return Response(content, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={'Content-Disposition': f"attachment; filename=student-jobs.xlsx; filename*=UTF-8''{filename}"})
+
 
 @app.get('/api/students/{student_id}/matched-jobs')
 def matched_jobs(student_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):

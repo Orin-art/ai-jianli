@@ -2,6 +2,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api, salary } from './api'
+import ExportJobs from './ExportJobs.vue'
 
 const props = defineProps<{ student: { id: number; name: string } }>()
 const emit = defineEmits(['recommended'])
@@ -41,6 +42,7 @@ async function recommend() {
     <p class="hint">城市、意向岗位、学历和专业通过规则筛选后，仅展示排序最靠前的 5 个；不足 5 个不补凑。岗位专业未填写或条件无法核实时不入选。每次只确认推荐 1 个，推荐后补入下一候选。</p>
     <p class="hint">学员经验、期望薪资尚未记录，未参与筛选；确认推荐前仍需核对岗位原文。候选列表不会自动生成推荐记录。</p>
     <p v-if="!loading && !error && total > 5" class="hint">共有 {{ total }} 个岗位通过规则筛选，本次只展示前 5 个。</p>
+    <ExportJobs v-if="items.length" :student="student" :jobs="items" label="导出本次匹配岗位" />
     <p v-if="!loading && !error && missing.length" class="extraction-warning">建议完善：{{ missing.join('、') }}。</p>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
     <div v-loading="loading" class="match-results">
