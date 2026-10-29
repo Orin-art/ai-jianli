@@ -48,7 +48,7 @@ def active_jobs(db):
 def sync():
     global _last_sync, _sync_error
     with SessionLocal() as db:
-        data = request('/sync', {'jobs': [document(job) for job in active_jobs(db)]})
+        data = request('/sync', {'jobs': [document(job) for job in active_jobs(db)]}, timeout=1800)
     _last_sync = now().isoformat()
     _sync_error = False
     return data
@@ -58,7 +58,10 @@ def status():
     if not configured():
         return {'ready': False, 'message': 'Qdrant 向量检索尚未配置'}
     try:
-        return {**request('/health', timeout=5), 'engine': 'Qdrant', 'last_sync': _last_sync, 'sync_pending': _sync_error}
+        health = request('/health', timeout=5)
+        if _sync_error and not health.get('indexing'):
+            health.update(ready=False, message='岗位索引同步失败，后台正在重试；请刷新状态或联系管理员检查。')
+        return {**health, 'engine': 'Qdrant', 'last_sync': _last_sync, 'sync_pending': _sync_error}
     except HTTPException:
         return {'ready': False, 'message': 'Qdrant 向量服务正在准备或暂不可用'}
 

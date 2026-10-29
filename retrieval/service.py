@@ -24,10 +24,10 @@ CHUNK_VERSION = 2
 class JobDocument(BaseModel):
     model_config = ConfigDict(extra='forbid')
     id: int = Field(gt=0)
-    title: str = Field(min_length=1, max_length=160)
-    city: str = Field(max_length=80)
+    title: str = Field(min_length=1, max_length=2000)
+    city: str = Field(max_length=1000)
     education: str = Field(max_length=20)
-    major: str = Field(max_length=200)
+    major: str = Field(max_length=1000)
     experience: str = Field(max_length=20)
     description: str = Field(max_length=10000)
     salary_min: int | None = None
@@ -59,6 +59,8 @@ class Index:
     def __init__(self, client, encoder, collection=COLLECTION):
         self.client, self.encoder, self.collection = client, encoder, collection
         self.lock = threading.RLock()
+        self._progress = {'indexed_jobs': 0, 'indexed_chunks': 0}
+        self._target_jobs = 0
         if not client.collection_exists(collection):
             client.create_collection(collection, vectors_config=models.VectorParams(size=DIMENSIONS, distance=models.Distance.COSINE))
         info = client.get_collection(collection)
@@ -81,26 +83,35 @@ class Index:
         updated = 0
         if len({job.id for job in jobs}) != len(jobs):
             raise ValueError('Duplicate job IDs')
+        pending = []
         for job in jobs:
             version = digest(job)
             texts = chunks(job)
             existing = stored.get(job.id, [])
             if len(existing) == len(texts) and set(existing) == {version}:
                 continue
-            vectors = list(self.encoder.passage_embed(texts))
-            points = [models.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f'{self.collection}:{job.id}:{version}:{i}')),
-                        vector=vector.tolist(), payload={'job_id': job.id, 'digest': version, 'chunk': i, 'text': text})
-                      for i, (text, vector) in enumerate(zip(texts, vectors, strict=True))]
-            for start in range(0, len(points), 32):
-                self.client.upsert(self.collection, points=points[start:start + 32], wait=True)
-            self.client.delete(self.collection, models.FilterSelector(filter=models.Filter(
-                must=[models.FieldCondition(key='job_id', match=models.MatchValue(value=job.id))],
-                must_not=[models.FieldCondition(key='digest', match=models.MatchValue(value=version))])), wait=True)
-            updated += 1
+            pending.append((job, version, texts))
+        for start in range(0, len(pending), 16):
+            batch = pending[start:start + 16]
+            vectors = iter(self.encoder.passage_embed([text for _, _, texts in batch for text in texts]))
+            for job, version, texts in batch:
+                points = [models.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f'{self.collection}:{job.id}:{version}:{i}')),
+                            vector=next(vectors).tolist(), payload={'job_id': job.id, 'digest': version, 'chunk': i, 'text': text})
+                          for i, text in enumerate(texts)]
+                for point_start in range(0, len(points), 32):
+                    self.client.upsert(self.collection, points=points[point_start:point_start + 32], wait=True)
+                if job.id in stored:
+                    self.client.delete(self.collection, models.FilterSelector(filter=models.Filter(
+                        must=[models.FieldCondition(key='job_id', match=models.MatchValue(value=job.id))],
+                        must_not=[models.FieldCondition(key='digest', match=models.MatchValue(value=version))])), wait=True)
+                stored[job.id] = [version] * len(texts)
+                updated += 1
+            self._progress = {'indexed_jobs': len(stored), 'indexed_chunks': sum(len(v) for v in stored.values())}
         return updated
 
     def sync(self, jobs):
         with self.lock:
+            self._target_jobs = len(jobs)
             stored = self.stored()
             updated = self._upsert(jobs, stored)
             stale = set(stored) - {job.id for job in jobs}
@@ -125,10 +136,17 @@ class Index:
                     'eligible_jobs': len(jobs), 'model': MODEL}
 
     def status(self):
-        with self.lock:
+        base = {'model': MODEL, 'revision': REVISION, 'dimensions': DIMENSIONS}
+        if not self.lock.acquire(blocking=False):
+            progress = dict(self._progress)
+            return {**base, **progress, 'ready': False, 'indexing': True, 'target_jobs': self._target_jobs,
+                    'message': f"岗位索引正在更新：已索引 {progress['indexed_jobs']} / {self._target_jobs} 个岗位，请稍后刷新状态。"}
+        try:
             stored = self.stored()
-            return {'ready': True, 'model': MODEL, 'revision': REVISION, 'dimensions': DIMENSIONS, 'indexed_jobs': len(stored),
-                    'indexed_chunks': sum(len(v) for v in stored.values())}
+            self._progress = {'indexed_jobs': len(stored), 'indexed_chunks': sum(len(v) for v in stored.values())}
+            return {**base, **self._progress, 'ready': True, 'indexing': False}
+        finally:
+            self.lock.release()
 
 
 index = None

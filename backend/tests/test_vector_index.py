@@ -1,5 +1,7 @@
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 import numpy as np
 import pytest
@@ -109,3 +111,49 @@ def test_reindex_is_admin_only(clients, monkeypatch):
     assert calls == []
     assert admin.post('/api/ai/reindex').json()['indexed_jobs'] == 21
     assert len(calls) == 1
+
+
+def test_retrieval_accepts_current_import_field_limits():
+    from app.schemas import JobInput
+    data = JobInput(title='岗' * 2000, company='公司', city='市' * 1000, major='专' * 1000)
+    assert JobDocument.model_validate({'id': 1, **vector_index.document(type('Job', (), {'id': 1, **data.model_dump()})())}).title == data.title
+    for field in ('title', 'city', 'major'):
+        assert JobDocument.model_json_schema()['properties'][field]['maxLength'] == JobInput.model_json_schema()['properties'][field]['maxLength']
+
+
+def test_status_remains_responsive_while_building(index):
+    acquired, release = threading.Event(), threading.Event()
+    def hold():
+        with index.lock:
+            index._target_jobs = 100
+            index._progress = {'indexed_jobs': 16, 'indexed_chunks': 32}
+            acquired.set()
+            release.wait(3)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        holder = pool.submit(hold)
+        assert acquired.wait(1)
+        try:
+            status = pool.submit(index.status).result(timeout=1)
+            assert status['ready'] is False and status['indexing'] is True
+            assert status['indexed_jobs'] == 16 and status['target_jobs'] == 100
+        finally:
+            release.set()
+        holder.result()
+
+
+def test_failed_sync_is_not_reported_as_ready(monkeypatch):
+    monkeypatch.setenv('RETRIEVAL_URL', 'http://retrieval')
+    monkeypatch.setattr(vector_index, '_sync_error', True)
+    monkeypatch.setattr(vector_index, 'request', lambda *args, **kwargs: {'ready': True, 'indexed_jobs': 0})
+    assert vector_index.status()['ready'] is False
+
+
+def test_many_jobs_share_embedding_batches(index, monkeypatch):
+    calls=[]
+    original=index.encoder.passage_embed
+    def embed(texts):
+        calls.append(len(texts))
+        return original(texts)
+    monkeypatch.setattr(index.encoder,'passage_embed',embed)
+    assert index.sync([job(i) for i in range(1,34)])['indexed_jobs']==33
+    assert len(calls)==3
